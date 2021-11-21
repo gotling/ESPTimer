@@ -26,6 +26,8 @@ https://github.com/MajicDesigns/MD_MAX72XX
 
 https://github.com/MajicDesigns/MD_Parola
 
+Configure font: https://pjrp.github.io/MDParolaFontEditor
+
 ### InputDebounce
 
 https://github.com/Mokolea/InputDebounce
