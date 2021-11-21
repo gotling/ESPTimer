@@ -31,3 +31,11 @@ Configure font: https://pjrp.github.io/MDParolaFontEditor
 ### InputDebounce
 
 https://github.com/Mokolea/InputDebounce
+
+### WiFiManager
+
+https://github.com/tzapu/WiFiManager
+
+### NTPClient
+
+https://github.com/arduino-libraries/NTPClient
