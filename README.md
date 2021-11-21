@@ -1,4 +1,4 @@
-# ESPTimer
+# Just A Timer
 A timer based on ESP and 8x8 matrixes
 
 # Hardware
