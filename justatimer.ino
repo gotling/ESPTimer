@@ -9,17 +9,34 @@
 #include <MD_Parola.h>
 #include <SPI.h>
 #include "InputDebounce.h"
+#include <PubSubClient.h>
 
-#include "Font_Data.h"
+#include "kFont_Data.h"
+#include "2kFont_Data.h"
 #include "pitches.h"
 
 // WiFi
 WiFiManager wm;
-WiFiManagerParameter display_brightness("brightness", "Display brightness (0-15)", "5", 2);
+WiFiManagerParameter display_brightness("brightness", "Display brightness (0-15)", "2", 2);
+
 
 // NTP
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "europe.pool.ntp.org");
+#define TIME_OFFSET 2
+short timeOffset = TIME_OFFSET;
+
+// MQTT
+const char* mqtt_server = "10.0.0.3";
+WiFiClient espClient;
+PubSubClient client(espClient);
+unsigned long lastMsg = 0;
+#define MSG_BUFFER_SIZE	(50)
+char msg[MSG_BUFFER_SIZE];
+int value = 0;
+int power = -1;
+float price = -1;
+float consumption = -1;
 
 // Display
 #define HARDWARE_TYPE MD_MAX72XX::FC16_HW
@@ -35,8 +52,9 @@ MD_Parola myDisplay = MD_Parola(HARDWARE_TYPE, CS_PIN, MAX_DEVICES);
 
 #define BUF_SIZE  10
 char message[BUF_SIZE];
+char prefix[3];
 
-int brightness = 3;
+int brightness = 2;
 
 // Input buttons
 #define buttonAction D1
@@ -48,7 +66,7 @@ int buttonIncreaseState = false;
 static InputDebounce buttonTestIncrease;
 
 #define BUTTON_DEBOUNCE_DELAY   20   // [ms]
-#define STEP 10 // Increase adds this many seconds
+#define STEP 30 // Increase adds this many seconds
 
 // Notificaiton
 #define MELODY_PIN D6
@@ -58,7 +76,10 @@ static InputDebounce buttonTestIncrease;
 int timer = INITIAL_VALUE;
 
 unsigned long previousMillis = 0;
-const long interval = 1000;
+unsigned long interval = 1000;
+
+unsigned long previousTimeMillis = 0;
+unsigned long timeInterval = 360000;
 
 char timerDisplay[8];
 
@@ -67,7 +88,11 @@ bool active = false;
 enum mode {
   None = 0,
   Timer = 1,
-  StopWatch = 2
+  StopWatch = 2,
+  Power = 3,
+  Price = 4,
+  Consumption = 5,
+  TimerPlus = 6
 };
 
 mode state = None;
@@ -105,6 +130,9 @@ bool portalRunning = false;
 void buttonTest_pressedDurationCallback(uint8_t pinIn, unsigned long duration)
 { 
   unsigned long now = millis();
+  interval = 1000;
+  Serial.print("Button");
+  Serial.println(pinIn, duration);
 
   if (buttonActionState && buttonIncreaseState) {
       if (now - increaseMillis >= increaseInterval) {
@@ -128,9 +156,13 @@ void buttonTest_pressedDurationCallback(uint8_t pinIn, unsigned long duration)
         portalRunning = true;
       }
       
+      myDisplay.setFont(nullptr);
+      myDisplay.print("CONFIG");
       return;
     }
     Serial.println("RESET");
+    myDisplay.setFont(nullptr);
+    myDisplay.print("RESET");
     active = false;
     state = None;
     timer = 0;
@@ -169,9 +201,51 @@ void saveParamsCallback () {
   myDisplay.setIntensity(brightness);
 }
 
+// MQTT
+void callback(char* topic, byte* payload, unsigned int length) {
+  // Serial.print("Message arrived [");
+  // Serial.print(topic);
+  // Serial.print("] ");
+  payload[length] = '\0';
+
+  // Serial.print("Topic: Value: ");
+  // Serial.println(atoi((char *)payload));
+
+  if (strcmp("tibber/power", topic) == 0) {
+    power = atoi((char *)payload);
+  } else if (strcmp("tibber/price", topic) == 0) {
+    price = atof((char *)payload);
+  } else if (strcmp("tibber/consumption-today", topic) == 0) {
+    consumption = atof((char *)payload);
+  }
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP8266Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      // ... and resubscribe
+      client.subscribe("tibber/+");
+      Serial.println("Subscribed");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
 void setup() {
   // put your setup code here, to run once:
-  Serial.begin(9600);
+  Serial.begin(115200);
   
   // Intialize the object:
   myDisplay.begin();
@@ -217,11 +291,17 @@ void setup() {
   else {
       Serial.println("Configuration portal running");
   }
+
+  // MQTT
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+  client.setKeepAlive(60);
+  client.setSocketTimeout(60);
   
   // NTP
   timeClient.begin();
-  timeClient.setTimeOffset(3600);
-  timeClient.update();  
+  timeClient.setTimeOffset(timeOffset * 3600);
+  timeClient.update();
 }
 
 void playMelody() {
@@ -246,10 +326,37 @@ void playMelody() {
   }
 }
 
+void progressState() {
+  if (state == None)
+    state = Power;
+  else if (state == Power)
+    state = Price;
+  else if (state == Price)
+    state = Consumption;
+  else if (state == Consumption)
+    state = None;
+}
+
 void loop() {
-  wm.process();
-  
+  // MQTT
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
   unsigned long now = millis();
+  // poll button state
+  buttonTestAction.process(now); // callbacks called in context of this function
+  buttonTestIncrease.process(now);
+
+  // WiFi manager
+  wm.process();
+
+  // Update time
+  if (now - previousTimeMillis >= timeInterval) {
+    previousTimeMillis = now;
+    timeClient.update();    
+  }
+
   if (now - previousMillis >= interval) {
     previousMillis = now;
 
@@ -260,38 +367,70 @@ void loop() {
         timer++;
 
       if (timer < 0) {
-        active = false;
+        //active = false;
         timer = 0;
         myDisplay.setFont(nullptr);
         myDisplay.print("DONE");
-        state = None;
+        state = TimerPlus;
         playMelody();
       }
     } else if (timer == 0) {
-      sprintf(timerDisplay, "%02d:%02d\0", timeClient.getHours(), timeClient.getMinutes());
-      memcpy(message, timerDisplay, BUF_SIZE);
-  
-      myDisplay.setFont(numeric7Seg);
-      myDisplay.print(message);
-    }
-  }
-  
-  // poll button state
-  buttonTestAction.process(now); // callbacks called in context of this function
-  buttonTestIncrease.process(now);
+      if (state == None) {
+        sprintf(timerDisplay, "%02d:%02d\0", timeClient.getHours(), timeClient.getMinutes());
+        interval = 10000;
+        myDisplay.setFont(numeric7Seg);
+      } else if (state == Power) {
+        sprintf(timerDisplay, "%02d w\0", power);
+        interval = 3000;
+        myDisplay.setFont(numeric7Seg2);
+      } else if (state == Price) {
+        sprintf(timerDisplay, "%0.2f k\0", price);
+        interval = 3000;
+        myDisplay.setFont(numeric7Seg2);
+      }  else if (state == Consumption) {
+        if (consumption >= 10) {
+          sprintf(timerDisplay, "%0.1f W\0", consumption);
+        } else {
+          sprintf(timerDisplay, "%0.2f W\0", consumption);
+        }
+        interval = 3000;
+        myDisplay.setFont(numeric7Seg2);
+      } else {
+        myDisplay.setFont(nullptr);
+        sprintf(timerDisplay, "hmm %d\0", state);
+        interval = 1000;
+      }
 
-  if ((timer > 0) || (active)) {
-    if (timer >= 600) {
-      sprintf(timerDisplay, "%02d:%02d\0", timer / 60, timer % 60);
-    } else if (timer >= 60) {
-      sprintf(timerDisplay, "%d:%02d\0", timer / 60, timer % 60);
-    } else {
-      sprintf(timerDisplay, "%d\0", timer);
+      progressState();
     }
-  
+
+    if (timer > 0) {
+      Serial.println(state);
+      if (state == TimerPlus) {
+        strcpy(prefix, "+\n");
+      } else {
+        strcpy(prefix, "\n");
+      }
+      myDisplay.setFont(numeric7Seg);
+      
+      if (timer >= 3600) {
+        sprintf(timerDisplay, "%s%02d:%02d\0", prefix, timer / 3600, timer % 3600 - timer % 60);
+      } else if (timer >= 600) {
+        sprintf(timerDisplay, "%s%02d:%02d\0", prefix, timer / 60, timer % 60);
+      } else if (timer >= 60) {
+        sprintf(timerDisplay, "%s%d:%02d\0", prefix, timer / 60, timer % 60);
+      } else {
+        sprintf(timerDisplay, "%s%d\0", prefix, timer);
+      }
+
+      
+    }
+    
     memcpy(message, timerDisplay, BUF_SIZE);
-  
-    myDisplay.setFont(numeric7Seg);
-    myDisplay.print(message);
+    myDisplay.print(message);  
   }
+
+  // if ((timer > 0) || (active)) {
+    
+  // }
 }
